@@ -1,6 +1,7 @@
 # slope-predict
 
-A final project for COMP 562 - Machine Learning\n
+A final project for COMP 562 - Machine Learning
+
 Merha B, Shu N, Sahith R, Jason X
 
 ## Motivation
