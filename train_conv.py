@@ -13,23 +13,30 @@ import os
 import pywt
 import zipfile
 import fnmatch
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib
+font = {'family' : 'normal',
+        'weight' : 'bold',
+        'size'   : 22}
+
+matplotlib.rc('font', **font)
 
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 tf.random.set_seed(1234)
 np.random.seed(seed=1234)
-os.environ['TF_ENABLE_AUTO_MIXED_PRECISION'] = '1'
-tf.config.list_physical_devices('GPU') 
-!nvidia-smi
 
 from google.colab import drive
 drive.mount('/content/drive')
 !ls '/content/drive/My Drive/Google Colab/COMP562FinalProject'
+!pip install pyyaml h5py  # Required to save models in HDF5 format
 
+from scipy.signal import resample
 feats_to_use = [1, 3, 7, -1]
-
-fs = 100
 
 def data_from_zip(path):
     data = []
@@ -39,12 +46,11 @@ def data_from_zip(path):
 
         for f in files:
             d = np.load(zf.open(f))[1000:,feats_to_use]
-
             if data == []:
                 data = d
+
             else:
                 data = np.vstack((data,d))
-
     return data
 
 train_path = '/content/drive/My Drive/Google Colab/COMP562FinalProject/data/augment.zip'
@@ -52,19 +58,19 @@ test_path = '/content/drive/My Drive/Google Colab/COMP562FinalProject/data/test.
 
 train_val_data = data_from_zip(train_path)
 test_data = data_from_zip(test_path)
+test_data = resample(test_data, int(len(test_data)/3))
 
 n = train_val_data.shape[0]
 
 train_data = train_val_data[:int(n*0.75),:]
 val_data = train_val_data[int(n*0.75):,:]
 
-train_mean = train_data[:,:-1].mean()
-train_std = train_data[:,:-1].std()
+train_mean = np.mean(train_data[:,:-1], axis=0)
+train_std = np.std(train_data[:,:-1], axis=0)
 
-train_data[:,:-1] = (train_data[:,:-1] - train_mean) / train_std
-val_data[:,:-1] = (val_data[:,:-1] - train_mean) / train_std
-test_data[:,:-1] = (test_data[:,:-1] - train_mean) / train_std
-
+train_data[:,:-1] = np.divide(np.subtract(train_data[:,:-1], train_mean), train_std)
+val_data[:,:-1] = np.divide(np.subtract(val_data[:,:-1], train_mean), train_std)
+test_data[:,:-1] = np.divide(np.subtract(test_data[:,:-1], train_mean), train_std)
 
 class WindowGenerator():
     def __init__(self, input_width, label_width, shift, strides,
@@ -129,7 +135,7 @@ class WindowGenerator():
             sequence_length=self.total_window_size,
             sequence_stride=self.strides,
             shuffle=True,
-            batch_size=128,)
+            batch_size=48,)
 
         ds = ds.map(self.split_window)
         return ds
@@ -151,18 +157,18 @@ class WindowGenerator():
         result = getattr(self, '_example', None)
         if result is None:
             # No example batch was found, so get one from the `.val` dataset
-            result = next(iter(self.val))
+            result = next(iter(self.test))
             # And cache it for next time
             self._example = result
         return result
 
-    def plot(self, model=None, plot_col_index=-1, max_subplots=30):
+    def plot(self, model=None, plot_col_index=-1, max_subplots=30, conf_mat=False):
         inputs, labels = self.example
-        plt.figure(figsize=(12, 80))
+        plt.figure(figsize=(15, 12*max_subplots))
         max_n = min(max_subplots, len(inputs))
         for n in range(max_n):
             plt.subplot(max_n, 1, n+1)
-            plt.ylabel('Slope')
+            plt.ylabel('Slope (Degrees)')
             #plt.plot(self.input_indices, inputs[n, :, plot_col_index],
              #       label='Inputs', marker='.', zorder=-10)
             plt.scatter(self.label_indices, labels[n, :, plot_col_index],
@@ -176,9 +182,26 @@ class WindowGenerator():
             if n == 0:
                 plt.legend()
 
-        plt.xlabel('Samples')
-        plt.show()
+            if (conf_mat):
+                plt.title('CNN Predictions vs. Labels')
+                plt.xlabel('Samples')
+                plt.show()
 
+                label_conf = labels[n, :, -1]
+                pred_conf = predictions[n, :, -1]
+
+                bins = [0,1,2,3,4,5,6,7]
+                label_conf = np.digitize(label_conf,bins).astype(int)
+                pred_conf = np.digitize(pred_conf,bins).astype(int)
+                print(label_conf)
+                print(pred_conf)
+                plt.figure(figsize=(20,20))
+                sns.heatmap(confusion_matrix(label_conf, pred_conf, normalize='true'), annot=True)
+                plt.ylabel('Label')
+                plt.xlabel('Prediction')
+                plt.title('CNN Binned Confusion Matrix')
+
+fs = 33
 
 def compile_and_fit(model, window, patience=3):
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
@@ -186,13 +209,13 @@ def compile_and_fit(model, window, patience=3):
                                                     mode='min',
                                                     restore_best_weights=True)
 
-    model.compile(loss=tf.losses.MeanSquaredError(),
-                optimizer= tf.train.experimental.enable_mixed_precision_graph_rewrite(tf.optimizers.Adam(learning_rate=0.001)),
+    model.compile(loss=tf.losses.MeanAbsoluteError(),
+                optimizer=tf.optimizers.Adam(learning_rate=0.00005),
                 metrics=[tf.metrics.RootMeanSquaredError()])
 
     history = model.fit(window.train, epochs=MAX_EPOCHS,
-                      validation_data=window.val,
-                      callbacks=[early_stopping])
+                    validation_data=window.val,
+                    callbacks=[early_stopping])
     return history
 
 class ResidualBlock(tf.keras.layers.Layer):
@@ -210,163 +233,85 @@ class ResidualBlock(tf.keras.layers.Layer):
         self.block_1 = tf.keras.Sequential([
             tf.keras.layers.Conv1D(filters=inner_depth, kernel_size=(1,), strides=init_strides),
             tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.LeakyReLU(),
+            tf.keras.layers.Activation('relu'),
 
             tf.keras.layers.Conv1D(filters=inner_depth, kernel_size=(kernel_size,), padding='same'),
             tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.LeakyReLU(),
+            tf.keras.layers.Activation('relu'),
 
             tf.keras.layers.Conv1D(filters=(input_depth/2 if not new_stage else input_depth), kernel_size=(1,)),
-            tf.keras.layers.BatchNormalization(),                         
+            tf.keras.layers.BatchNormalization(),                        
         ])
 
         self.block_2 = tf.keras.Sequential([
             tf.keras.layers.Conv1D(filters=inner_depth, kernel_size=(1,), strides=init_strides),
             tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.LeakyReLU(),
+            tf.keras.layers.Activation('relu'),
 
-            tf.keras.layers.Conv1D(filters=inner_depth, kernel_size=(kernel_size*2,), padding='same'),
+            tf.keras.layers.Conv1D(filters=inner_depth, kernel_size=(kernel_size+2,), padding='same'),
             tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.LeakyReLU(),
+            tf.keras.layers.Activation('relu'),
 
             tf.keras.layers.Conv1D(filters=(input_depth/2 if not new_stage else input_depth), kernel_size=(1,)),
-            tf.keras.layers.BatchNormalization(),                         
+            tf.keras.layers.BatchNormalization(),                        
         ])
 
     def call(self, input, *args, **kwargs):
         if (self.new_stage):
-            return tf.nn.leaky_relu(tf.concat([self.block_1(input),self.block_2(input)], -1) + self.shortcut_pad(input))
+            return tf.nn.relu(tf.concat([self.block_1(input),self.block_2(input)], -1) + self.shortcut_pad(input))
         else:
-            return tf.nn.leaky_relu(tf.concat([self.block_1(input),self.block_2(input)], -1) + input)
+            return tf.nn.relu(tf.concat([self.block_1(input),self.block_2(input)], -1) + input)
 
+conv_model_84_res  = tf.keras.Sequential([
+    tf.keras.layers.Conv1D(filters=64,strides=1, kernel_size=(26,)),
+    tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Activation('relu'),
+    tf.keras.layers.MaxPool1D(7, strides=1),
+    tf.keras.layers.Conv1D(filters=64,
+                        kernel_size=(10,)),
+    tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Activation('relu'),
 
-conv_model_300_1 = tf.keras.Sequential([
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(136,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(6, strides=1, padding='valid'),
-    
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(128,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(3, strides=1, padding='valid'),
-        
-    tf.keras.layers.Conv1D(filters=512,
-                           kernel_size=(31,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
+    ResidualBlock(64, 2, 6),
+    ResidualBlock(64, 2, 6),
 
-    tf.keras.layers.Dense(units=512, activation=tf.keras.layers.LeakyReLU(alpha=0.01)),
+    tf.keras.layers.AveragePooling1D(44, strides=1),
+    tf.keras.layers.Dense(units=1024, activation=tf.keras.layers.Activation('relu'), kernel_regularizer='l2'),
     tf.keras.layers.Dropout(0.5),
+    tf.keras.layers.Dense(units=512, activation=tf.keras.layers.Activation('relu'), kernel_regularizer='l2'),
     tf.keras.layers.Dense(units=1),
 ])
 
-conv_model_500_1 = tf.keras.Sequential([
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(336,)),
+conv_model_84 = tf.keras.Sequential([
+    tf.keras.layers.Conv1D(filters=64,
+                        kernel_size=(26,)),
     tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(6, strides=1, padding='valid'),
-    
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(128,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(3, strides=1, padding='valid'),
-        
-    tf.keras.layers.Conv1D(filters=512,
-                           kernel_size=(31,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
+    tf.keras.layers.Activation('swish'),
+    tf.keras.layers.MaxPool1D(5, strides=1),
 
-    tf.keras.layers.Dense(units=512, activation=tf.keras.layers.LeakyReLU(alpha=0.01)),
+    tf.keras.layers.Conv1D(filters=128,
+                        kernel_size=(10,)),
+    tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Activation('swish'),
+    tf.keras.layers.AveragePooling1D(46, strides=1),
+
+    tf.keras.layers.Dense(units=512, activation=tf.keras.layers.Activation('swish'), kernel_regularizer='l2'),
     tf.keras.layers.Dropout(0.5),
+    tf.keras.layers.Dense(units=512, activation=tf.keras.layers.Activation('swish'), kernel_regularizer='l2'),
+
     tf.keras.layers.Dense(units=1),
 ])
 
-conv_model_500_res  = tf.keras.Sequential([
-    tf.keras.layers.Conv1D(filters=128,strides=1, kernel_size=(376,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(),
-    tf.keras.layers.MaxPool1D(35, strides=1),
+models = [conv_model_84_res]
 
-    ResidualBlock(128, 32, 64),
-    ResidualBlock(128, 32, 64),
-
-    tf.keras.layers.MaxPool1D(31, strides=1),
-
-    ResidualBlock(128, 16, 128, True),
-    ResidualBlock(256, 16, 128),
-
-    tf.keras.layers.MaxPool1D(31, strides=1),
-
-    ResidualBlock(256, 8, 256, True),
-    ResidualBlock(512, 8, 256),
-
-    tf.keras.layers.AveragePooling1D(31, strides=1),
-
-    tf.keras.layers.Dens 64e(units=512, activation=tf.keras.layers.LeakyReLU(alpha=0.01)),
-    tf.keras.layers.Dropout(0.5),
-    tf.keras.layers.Dense(units=1),
-])
-
-conv_model_700_1 = tf.keras.Sequential([
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(536,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(6, strides=1, padding='valid'),
-    
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(128,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(3, strides=1, padding='valid'),
-        
-    tf.keras.layers.Conv1D(filters=512,
-                           kernel_size=(31,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-
-    tf.keras.layers.Dense(units=512, activation=tf.keras.layers.LeakyReLU(alpha=0.01)),
-    tf.keras.layers.Dropout(0.5),
-    tf.keras.layers.Dense(units=1),
-])
-
-conv_model_900_1 = tf.keras.Sequential([
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(736,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(6, strides=1, padding='valid'),
-    
-    tf.keras.layers.Conv1D(filters=128,
-                           kernel_size=(128,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-    tf.keras.layers.MaxPool1D(3, strides=1, padding='valid'),
-        
-    tf.keras.layers.Conv1D(filters=512,
-                           kernel_size=(31,)),
-    tf.keras.layers.BatchNormalization(),
-    tf.keras.layers.LeakyReLU(alpha=0.01),
-
-    tf.keras.layers.Dense(units=512, activation=tf.keras.layers.LeakyReLU(alpha=0.01)),
-    tf.keras.layers.Dropout(0.5),
-    tf.keras.layers.Dense(units=1),
-])
-
-models = [conv_model_500_res]
-
-MAX_EPOCHS = 20
+MAX_EPOCHS = 60
 eval_width = 1000
-window_widths = fs * np.array([5])
+window_widths = [84]
 val_performance = {}
 performance = {}
 
 for i, window_width in enumerate(window_widths):
+    
     model = models[i]
     conv_width = window_width
 
@@ -374,7 +319,7 @@ for i, window_width in enumerate(window_widths):
         input_width=conv_width,
         label_width=1,
         shift=0,
-        strides=2,
+        strides=500,
         label_columns_indices=[-1])
 
     wide_eval_window = WindowGenerator(
@@ -390,7 +335,6 @@ for i, window_width in enumerate(window_widths):
         strides=1,
         label_columns_indices=[-1])
 
-
     print("Wide conv window")
     print('Input shape:', wide_conv_window.example[0].shape)
     print('Labels shape:', wide_conv_window.example[1].shape)
@@ -399,20 +343,29 @@ for i, window_width in enumerate(window_widths):
     history = compile_and_fit(model, conv_window)
     model.summary()
 
-    wide_conv_window.plot(model)
-    val_performance['Conv'] = model.evaluate(conv_window.val)
-    performance['Conv'] = model.evaluate(conv_window.test, verbose=0)
+    # Save the entire model as a SavedModel.
+    !mkdir -p '/content/drive/My Drive/Google Colab/COMP562FinalProject/saved_model'
+    tf.keras.models.save_model(model, '/content/drive/My Drive/Google Colab/COMP562FinalProject/saved_model/conv_model_{}'.format(i)) 
 
-eval_width = 2000
+    wide_conv_window.plot(model)
+    val_performance['Conv'.format(i)] = model.evaluate(conv_window.val)
+    performance['Conv'.format(i)] = model.evaluate(conv_window.test, verbose=0)
+
 wide_conv_window = WindowGenerator(
-    input_width=(conv_width-1)+eval_width,
-    label_width=eval_width,
+    input_width=(conv_width-1)+5000,
+    label_width=5000,
     shift=0,
     strides=1,
     label_columns_indices=[-1])
-wide_conv_window.plot(model)
+wide_conv_window.plot(model, max_subplots=1, conf_mat=True)
 
-plt.plot(test_data[:1000,2])
-
-plt.plot(train_data[-1000:,2])
+train_error = history.history['root_mean_squared_error']
+val_error = history.history['val_root_mean_squared_error']
+plt.figure(figsize=(10,10))
+plt.plot(train_error, label='Training RMSE', )
+plt.plot(val_error, label='Validation RMSE')
+plt.title('Training & Validation RMSE Error')
+plt.xlabel('Epoch')
+plt.ylabel('RMSE (Degrees)')
+plt.legend()
 
