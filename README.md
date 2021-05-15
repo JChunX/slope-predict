@@ -20,7 +20,3 @@ A smartphone was attached to a participant's right leg. As the participant walks
 
 We used logistic regression on feature scaleograms to determine the baseline performance and identify the best features to use. It was found that the y-acceleration, x-angular velocity, and pitch had the most predictive power. We then trained a logistic regression model using the scaleograms of the selected features. Separately, a 1D convolutional neural network was trained with the selected features using augmented data. 
 
-## Results
-
-![Data Collection](./figures/train_val.png)
-![Data Collection](./figures/cnn_conf.png)
