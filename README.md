@@ -14,4 +14,6 @@ That's not very satisfying. Your phone should be able to accurately track how ha
 
 ## Methods
 
+A smartphone was attached to a participant's right leg. As the participant walks on a treadmill with various inlines, the smartphone collects motion data while another device measures the ground slope. Nine features were measured: x,y,z acceleration, x,y,z angular velocity, azimuth, pitch, and roll. 
 
+We used logistic regression on feature scaleograms to determine the baseline performance and identify the best features to use. It was found that the y-acceleration, x-angular velocity, and pitch had the most predictive power. We then trained a logistic regression model using the scaleograms of the selected features. Separately, a 1D convolutional neural network was trained with the selected features using augmented data. 
