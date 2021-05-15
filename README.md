@@ -4,6 +4,8 @@ A final project for COMP 562 - Machine Learning
 
 Merha B, Shu N, Sahith R, Jason X
 
+![A test image](../figures/DataCollection.png)
+
 ## Motivation
 
 Smartphones have become so ubiquitous in our lives that we carry them everywhere in our pockets. We rely on phones to conduct everyday tasks, such as tracking our health. Phones today are able to count steps, measure running/walking distance, and even evaluate gait symmetry. This project aims to take the level of health tracking a step further. 
