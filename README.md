@@ -4,7 +4,7 @@ A final project for COMP 562 - Machine Learning
 
 Merha B, Shu N, Sahith R, Jason X
 
-![A test image](../figures/DataCollection.png)
+![Data Collection](slope-predict/figures/DataCollection.png)
 
 ## Motivation
 
